@@ -27,7 +27,7 @@ class MeanAggregator(nn.Module):
         self.cuda = cuda
         self.gcn = gcn
         
-    def forward(self, nodes, to_neighs, num_sample=10):
+    def forward(self, nodes, to_neighs, num_sample=None):
         """
         nodes --- list of nodes in a batch
         to_neighs --- list of sets, each set is the set of neighbors for node in batch
@@ -59,5 +59,8 @@ class MeanAggregator(nn.Module):
             embed_matrix = self.features(torch.LongTensor(unique_nodes_list).cuda())
         else:
             embed_matrix = self.features(torch.LongTensor(unique_nodes_list))
+        
+        #print("agg: ", embed_matrix)
         to_feats = mask.mm(embed_matrix)
         return to_feats
+    

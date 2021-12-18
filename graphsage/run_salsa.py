@@ -96,16 +96,16 @@ class SalsaLoader(object):
             objects = np.array(objects)
             
             # pre-compute
-            cos_bh = np.cos(np.abs(objects[:, 2] - objects[:, 3])) # CHECK FORMULA
-            bodypose_vectors = np.stack([np.cos(objects[:, 2]), np.sin(objects[:, 2])], axis=1)
-            headpose_vectors = np.stack([np.cos(objects[:, 3]), np.sin(objects[:, 3])], axis=1)
-            objects = np.concatenate([
-                objects, bodypose_vectors, headpose_vectors, cos_bh[:, None]
-            ], axis=-1)
+            #cos_bh = np.cos(np.abs(objects[:, 2] - objects[:, 3])) # CHECK FORMULA
+            #bodypose_vectors = np.stack([np.cos(objects[:, 2]), np.sin(objects[:, 2])], axis=1)
+            #headpose_vectors = np.stack([np.cos(objects[:, 3]), np.sin(objects[:, 3])], axis=1)
+            #objects = np.concatenate([
+            #    objects, bodypose_vectors, headpose_vectors, cos_bh[:, None]
+            #], axis=-1)
 
             feat_data[timestamp] = objects
-            adj_lists[timestamp] = _fformations
-        
+            adj_lists[timestamp] = self._shift_list_start_with_zero(_fformations)#_fformations
+        #self._normalize_feat(feat_data)
         return feat_data, adj_lists
     
     def split(self, feat_data, adj_lists, ratio=0.6):
@@ -137,6 +137,34 @@ class SalsaLoader(object):
         test_adj_lists = dict((k, adj_lists[k]) for k in test_keys)
 
         return train_feature_data, train_adj_lists, test_feature_data, test_adj_lists
+    
+    def _shift_list_start_with_zero(self, list_formation):
+        
+        result = []
+        
+        for f in list_formation:
+            result.append(list(np.array(f)-1))
+        return result
+
+    def _normalize_feat(self, feat_dict):
+        
+        np_feat = None
+        for key in feat_dict.keys():
+
+            if np_feat is None:
+                np_feat = feat_dict[key]
+            else:
+                np_feat = np.concatenate((np_feat, feat_dict[key]))
+
+        min_ = np.min(np_feat, axis=0)
+        max_ = np.max(np_feat, axis=0)
+        
+        np_feat = (np_feat - min_)/(max_-min_)
+        
+        i = 0
+        for key in feat_dict.keys():
+            feat_dict[key] = np_feat[i*18:(i+1)*18]
+            i += 1
 
     def _load_fformation(self, path):
         r"""
@@ -195,11 +223,12 @@ class SalsaLoader(object):
 
 class GraphFormation(nn.Module):
 
-    def __init__(self, n_out=15):
+    def __init__(self, n_out=15, num_features=4):
         
         super(GraphFormation, self).__init__()
-        
-        self.features = nn.Embedding(18, 9)
+            
+        self.num_features = num_features
+        self.features = nn.Embedding(18, self.num_features)
         self.enc = None
         self.n_out = n_out
 
@@ -210,19 +239,30 @@ class GraphFormation(nn.Module):
             torch.nn.Linear(30, 15),
             torch.nn.ReLU(),
             torch.nn.Linear(15, 1),
-            torch.nn.ReLU(),
         )
+    
+        #for i in self.two_fc.parameters():
+        #    print(i)
+        #exit()
     
     def build_model(self, adj_lists):
 
         self.adj_lists = adj_lists
-        self.agg1 = MeanAggregator(self.features, cuda=True)
-        self.enc1 = Encoder(self.features, 9, 20, self.adj_lists, self.agg1, gcn=False, cuda=False)
+        self.agg1 = MeanAggregator(self.features, cuda=False)
+        self.enc1 = Encoder(self.features, self.num_features, 10, self.adj_lists, self.agg1, gcn=True, cuda=False)
         self.agg2 = MeanAggregator(lambda nodes : self.enc1(nodes).t(), cuda=False)
         self.enc2 = Encoder(lambda nodes : self.enc1(nodes).t(), self.enc1.embed_dim, self.n_out, \
                 self.adj_lists, self.agg2, base_model=self.enc1, gcn=True, cuda=False)
         
+        self.enc1.num_sample = None
+        self.enc2.num_sample = None
+
         self.enc = self.enc2
+    
+    def set_adj_lists(self, adj_lists):
+
+        self.enc1.set_adj_lists(adj_lists)
+        self.enc2.set_adj_lists(adj_lists)
 
     def set_features(self, feat_data):
 
@@ -231,6 +271,9 @@ class GraphFormation(nn.Module):
     def forward(self, nodes):
         
         embeds = self.enc(nodes)
+        #print(nodes[3])
+        #print(torch.sum(embeds[3]))
+        #exit()
         return embeds
 
     def predict_link(self, to_pred):
@@ -246,12 +289,11 @@ class GraphFormation(nn.Module):
     def simple_link_prediction(self, to_pred):
 
         distmult = self.distmult.expand(to_pred.shape[0], self.distmult.shape[0])
+        #print("features: ", self.features.weight[1:2])
         embed1 = self.forward(to_pred[:, 0]).T
         embed2 = self.forward(to_pred[:, 1]).T
-        
         #print("Shape: ", distmult.shape, embed1.shape, embed2.shape)
         dot = (embed1*distmult*embed2).sum(dim=1)
-        print(dot.shape)
         return dot
         #return nn.Sigmoid()(dot)
 
@@ -269,6 +311,7 @@ def test_salsa(graph, test_feat, test_adj):
 
     predicts = []
     labels = []
+    tmp = False
 
     for key in test_feat.keys():
 
@@ -278,24 +321,65 @@ def test_salsa(graph, test_feat, test_adj):
         all_edges, all_labels = utils.create_all_edge(adj)
         graph.set_features(feat)
         preds = graph.predict_link(all_edges)
+        preds1 = list(preds.detach().numpy())
         preds = (torch.sigmoid(preds) > 0.5).type(torch.FloatTensor)
-        #print("test: ", preds)
+        
+        if not tmp:
+            tmp = True
+            #print("test: ", preds1)
+            #print("label: ", np.squeeze(all_labels))
+
         predicts += list(np.array(preds, dtype=np.int16))
         labels += list(np.squeeze(all_labels))
     
     print("F1 score: ", f1_score(predicts, labels))
 
+def create_adj_lists(fformations, num_persons=18):
+    
+    adj_lists = dict()
+
+    for i in range(num_persons):
+        adj_lists[i] = set()
+
+    for i in range(num_persons):
+        for formation in fformations:
+            if i in formation:
+                tmp = set(formation)
+                adj_lists[i] = adj_lists[i].union(tmp.difference({i}))
+        if len(adj_lists[i])==0:
+            adj_lists[i] = adj_lists[i].union({i})
+
+    return adj_lists
+
 def train_batch_salsa(graph, optimizer, batch):
     
     batch_feat, batch_adj = batch
-
+    
+    #adj_lists = dict()
+    #
+    #for i in range(18):
+    #    adj_lists[i] = {j for j in range(18) if j != i}
+    #
+    adj_lists = create_adj_lists(batch_adj, 18)
+    graph.set_adj_lists(adj_lists)
     graph.set_features(batch_feat)
     edges, bin_edge = utils.create_bin_edge(batch_adj)
     all_edges, labels = utils.negative_sample(edges, 1, bin_edge)
     labels = torch.Tensor(labels)
 
     preds = graph.predict_link(all_edges)
+    #print("logits: ", preds)
     #print("preds: ", (torch.sigmoid(preds) > 0.5).type(torch.FloatTensor))
+    #print("label traing: ", labels)
+
+    ######## Visualize predict and labels #########
+    viz_ = False
+
+    if viz_:
+        for l, p in zip(labels, preds):
+            print("{}-{}   ".format(l, p))
+    ###############################################
+
     loss = torch.nn.BCEWithLogitsLoss()(preds, labels)
     #loss = torch.nn.BCELoss()(preds, labels)
     optimizer.zero_grad()
@@ -308,22 +392,26 @@ def run_salsa(num_iters=1000, test_iters=10):
 
     salsa_loader = SalsaLoader(NUM_IDS)
     feat_data, adj_lists = salsa_loader.load_salsa(FFORMATION_CSV, GEOMETRY_DIR)
+    #print(feat_data); exit()
     train_feat, train_adj, test_feat, test_adj = salsa_loader.split(feat_data, adj_lists)
-
     adj_lists = dict()
     
     for i in range(18):
-        adj_lists[i] = {j for j in range(18)}
+        adj_lists[i] = {j for j in range(10) if j != i}
 
     graph = GraphFormation()
     graph.build_model(adj_lists)
     #print(graph); exit()
-    optimizer = torch.optim.SGD(filter(lambda p : p.requires_grad, graph.parameters()), lr=5e-3)
+    optimizer = torch.optim.SGD(filter(lambda p : p.requires_grad, graph.parameters()), lr=1e-4, momentum=0.9)
+    #optimizer = torch.optim.Adam(filter(lambda p : p.requires_grad, graph.parameters()), lr=1e-4)
     
     key_train = list(train_feat.keys())
     len_key_train = len(key_train)
     k = 0
     
+    key = list(train_feat.keys())[0]
+    sample_test_feature = {key: train_feat[key]}
+    sample_test_adj = {key: train_adj[key]}
     while k <= num_iters:
         key = key_train[k]
         batch = (train_feat[key], train_adj[key])
@@ -336,6 +424,7 @@ def run_salsa(num_iters=1000, test_iters=10):
 
         if k % test_iters == 0:
             test_salsa(graph, train_feat, train_adj)
+            #test_salsa(graph, sample_test_feature, sample_test_adj)
 
 if __name__=="__main__":
     

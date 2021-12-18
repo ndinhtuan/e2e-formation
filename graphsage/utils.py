@@ -80,7 +80,9 @@ def negative_sample(edges, num_samples, bin_adj_train):
             while bin_adj_train[all_edges[idx, 0], all_edges[idx, 1]] == 1:
                 all_edges[idx, to_replace] = np.random.randint(0, n-1)
             idx += 1
-    return all_edges, labels
+
+    shuffle = np.random.permutation(all_edges.shape[0])
+    return all_edges[shuffle], labels[shuffle]
 
 if __name__=="__main__":
     pass

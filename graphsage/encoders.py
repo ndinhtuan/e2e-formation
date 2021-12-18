@@ -46,5 +46,10 @@ class Encoder(nn.Module):
             combined = torch.cat([self_feats, neigh_feats], dim=1)
         else:
             combined = neigh_feats
-        combined = F.relu(self.weight.mm(combined.t()))
+
+        #combined = F.relu(self.weight.mm(combined.t()))
+        combined = self.weight.mm(combined.t())
         return combined
+
+    def set_adj_lists(self, adj_lists):
+        self.adj_lists = adj_lists
